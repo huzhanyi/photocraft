@@ -1992,6 +1992,9 @@ pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if ui.add_enabled(library_idle, egui::Button::new(tl!("Load Actions…"))).clicked() {
         act = Some("load");
     }
+    if ui.add_enabled(library_idle, egui::Button::new(tl!("Load Built-in Presets"))).clicked() {
+        act = Some("builtins");
+    }
     if ui.add_enabled(library_idle, egui::Button::new(tl!("Replace Actions…"))).clicked() {
         act = Some("replace");
     }
@@ -2034,6 +2037,7 @@ pub fn panel_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ),
         "insertMenu" => menu_item::open(app),
         "load" => load_dialog(app),
+        "builtins" => load_builtins(app),
         "clearAll" => library::open(app, library::Kind::Clear),
         "reset" => library::open(app, library::Kind::Reset),
         "replace" => library::open(app, library::Kind::Replace),
@@ -2403,6 +2407,22 @@ fn action_context_menu(app: &mut PhotocraftApp, response: &egui::Response, index
     });
 }
 
+fn load_builtins(app: &mut PhotocraftApp) -> Result<Value, String> {
+    let result = app.run("presets.load", json!({}))?;
+    if app.ui.actions.selected.is_none()
+        && let Some(name) = result.get("loaded").and_then(Value::as_array).and_then(|names| names.first()).and_then(Value::as_str)
+        && let Some(index) = app.session.actions.list.iter().position(|action| action.name == name)
+    {
+        app.ui.actions.selected = Some(index);
+        app.ui.actions.selected_step = None;
+    }
+    let loaded = result.get("loaded").and_then(Value::as_array).map(|names| names.len()).unwrap_or(0);
+    let skipped = result.get("skipped").and_then(Value::as_array).map(|names| names.len()).unwrap_or(0);
+    app.ui.status = format!("Loaded {loaded} built-in presets ({skipped} already there)");
+    app.ui.status_error = false;
+    Ok(result)
+}
+
 pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if app.ui.actions.slot_revision != app.session.actions.set_rows_revision {
         library_slots_changed(app);
@@ -2458,9 +2478,14 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             *expanded = true;
         }
     }
+    let can_load_builtins = library::idle(app, "presets.load").is_ok();
+    let mut load_builtin_click = false;
     egui::ScrollArea::vertical().id_salt("actions-rows").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, false]).show(ui, |ui| {
         if rows.is_empty() {
             ui.label(egui::RichText::new(tl!("Record ● a sequence of edits, then play ▶ it on any document.")).color(t.text_faint).size(11.5));
+            if ui.add_enabled(can_load_builtins, egui::Button::new(tl!("Load Built-in Presets"))).clicked() {
+                load_builtin_click = true;
+            }
         }
         scroll_actions_during_drag(ui);
         let mut collapsed = false;
@@ -2580,6 +2605,13 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
         }
     });
+    if load_builtin_click
+        && let Err(error) = load_builtins(app)
+        && error != "cancelled"
+    {
+        app.ui.status = error;
+        app.ui.status_error = true;
+    }
     if let Some((action, step)) = toggled {
         let _ = app.run("actions.toggle", json!({"action": action, "step": step}));
     }

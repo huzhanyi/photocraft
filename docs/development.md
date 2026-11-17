@@ -302,6 +302,8 @@ PhotoCraft CLI supports optional native GPU acceleration for flat exports and co
 
 `actions.json` holds the steps of a recorded action: `[["<id>", {…}], …]`, `[{"command": "<id>", "params": {…}}, …]` or bare ids, as a list or wrapped in `{"actions": …}` or `{"steps": …}`; a droplet file works too. It can also be an Actions set (the Actions panel's `actions.json`, `{"actions": [{"name": …, "steps": […]}, …]}`): `--action <name>` picks the action to play (optional when the set holds one), and the whole set is loaded for each file, so a step that plays another action of the set works. `batch` refuses an `--out` folder that is the `--in` folder, since the results would replace the originals, unless `--in-place` is given. `run` prints one JSON line per command result.
 
+Built-in presets use that same Actions shape. `photocraft-cli presets` lists them, with English and Chinese names and the export format, quality and filename template. `batch --preset <id>` and `run --preset <id>` play one. A preset does not replace a file that is already in the output unless `--overwrite` is passed. Face-centered ID crop and background removal are not in the library. See [Built-in presets](builtin-presets.md).
+
 ## Native format (.pcraft)
 
 `crates/format` defines the lossless native bundle. It is either a ZIP of STORE entries or a directory with the same layout:

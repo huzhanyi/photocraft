@@ -109,8 +109,38 @@ fn command_list(a: &RunArgs) -> Result<Vec<(String, Value)>> {
 /// Reported once by `run --gpu` when a step is `file.export.quickExport`.
 const QUICK_EXPORT_CPU_NOTE: &str = "file.export.quickExport runs on the CPU compositor; --gpu applies to --out and the export commands that take a renderer";
 
+fn refuse_preset_output(overwrite: bool, output: &Path) -> Result<()> {
+    if output.is_dir() {
+        return Err(CliError::Other(format!("{} is a directory; choose a file path", output.display())));
+    }
+    if !overwrite && output.exists() {
+        return Err(CliError::Other(format!("{} already exists; pass --overwrite to replace it", output.display())));
+    }
+    Ok(())
+}
+
 pub(crate) fn run_cmds(a: &RunArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result {
-    let opts = ExportOptions::from(&a.export);
+    let preset = match a.preset.as_deref() {
+        Some(id) => Some(photocraft_engine::preset_library_cmds::find(id)?),
+        None => None,
+    };
+    if let (Some(_), Some(output)) = (preset, a.out.as_deref()) {
+        refuse_preset_output(a.overwrite, output)?;
+    }
+    let mut opts = ExportOptions::from(&a.export);
+    if a.export.quality.is_none() {
+        crate::presets::apply_quality(&mut opts, preset.and_then(|preset| preset.quality));
+    }
+    let format_owned = a
+        .export
+        .format
+        .as_deref()
+        .map(|format| format.strip_prefix('.').unwrap_or(format).to_string())
+        .or_else(|| preset.and_then(|preset| preset.format.map(str::to_string)));
+    if let Some(preset) = preset {
+        let format = format_owned.as_deref().unwrap_or("same");
+        let _ = writeln!(err, "{}", crate::presets::describe(preset, format, a.export.quality.or(preset.quality), None, a.overwrite));
+    }
     let mut h = Headless::trusted_local();
     let policy = crate::gpu::GpuPolicy::from_args(&a.gpu).map_err(CliError::Other)?;
     policy.apply_to_headless(&mut h);
@@ -129,6 +159,14 @@ pub(crate) fn run_cmds(a: &RunArgs, out: &mut dyn Write, err: &mut dyn Write) ->
         let ws: Vec<String> = serde_json::from_value(o["warnings"].clone()).unwrap_or_default();
         warn_all(err, &ws);
         reported_fonts.extend(ws);
+    }
+    if let Some(preset) = preset {
+        let mut params = json!({"id": preset.id});
+        if let Some(over) = &a.preset_params {
+            params["params"] = over.clone();
+        }
+        let r = h.command_run("presets.apply", params).map_err(|source| CliError::Command { id: "presets.apply".to_string(), source })?;
+        print_json(out, &json!({"command": "presets.apply", "result": r}), JsonStyle::Compact)?;
     }
     let cmds = command_list(a)?;
     for (id, params) in cmds {
@@ -168,7 +206,7 @@ pub(crate) fn run_cmds(a: &RunArgs, out: &mut dyn Write, err: &mut dyn Write) ->
         h.session.active().map(|st| missing_font_warnings(&st.doc)).unwrap_or_default().into_iter().filter(|w| reported_fonts.insert(w.clone())).collect();
     warn_all(err, &remaining);
     if let Some(o) = a.out.as_deref() {
-        let saved = h.save(None, Some(o), a.export.format.as_deref(), &opts);
+        let saved = h.save(None, Some(o), format_owned.as_deref(), &opts);
         // Report GPU diagnostics even when the export fails: the fallback reason is queued
         // during the failed export and would otherwise be lost on the error path.
         let failed_diags: Vec<String> = h.drain_diagnostics().into_iter().filter(|w| reported_fonts.insert(w.clone())).collect();

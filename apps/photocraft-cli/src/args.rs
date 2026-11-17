@@ -34,6 +34,8 @@ pub(crate) enum Command {
     Info(InfoArgs),
     Run(RunArgs),
     Batch(BatchArgs),
+    /// List built-in export presets (English and Chinese names, sizes, and export settings)
+    Presets(PresetsArgs),
     Droplet(DropletArgs),
     Commands(CommandsArgs),
     Mcp(McpArgs),
@@ -152,12 +154,12 @@ pub(crate) struct InfoArgs {
 
 /// Open a file (or start a new document), run engine commands in order, save the result
 ///
-/// Prints each command's JSON result. Give exactly one of <FILE> or --new, and at least one --cmd
-/// or --out. An --out that is the <FILE> is refused, as the result would replace the original;
-/// --in-place allows it.
+/// Prints each command's JSON result. Give exactly one of <FILE> or --new, and at least one --cmd,
+/// --preset or --out. An --out that is the <FILE> is refused, as the result would replace the original;
+/// --in-place allows it. A --preset export leaves an existing --out file in place unless --overwrite.
 #[derive(Args)]
 #[command(group(ArgGroup::new("source").args(["file", "new"]).required(true)))]
-#[command(group(ArgGroup::new("work").args(["cmd", "out"]).required(true).multiple(true)))]
+#[command(group(ArgGroup::new("work").args(["cmd", "out", "preset"]).required(true).multiple(true)))]
 pub(crate) struct RunArgs {
     /// The document to open
     pub(crate) file: Option<PathBuf>,
@@ -173,6 +175,15 @@ pub(crate) struct RunArgs {
     /// Save the result to this file
     #[arg(long, value_name = "FILE")]
     pub(crate) out: Option<PathBuf>,
+    /// Apply a built-in preset (its id, English name, or Chinese name) before any --cmd
+    #[arg(long, value_name = "ID")]
+    pub(crate) preset: Option<String>,
+    /// JSON object merged over the preset's step parameters
+    #[arg(long, value_name = "JSON", value_parser = json, requires = "preset")]
+    pub(crate) preset_params: Option<Value>,
+    /// Replace an existing --out file when --preset is set. Without it, that file is left in place
+    #[arg(long)]
+    pub(crate) overwrite: bool,
     /// Allow an --out that is the <FILE>, replacing the original
     #[arg(long)]
     pub(crate) in_place: bool,
@@ -194,19 +205,44 @@ pub(crate) enum Step {
     Params(Value),
 }
 
-/// Apply an action list to every image in a directory
+/// List the built-in export presets
+#[derive(Args)]
+pub(crate) struct PresetsArgs {
+    /// Print the list as JSON
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Show one preset by id, English name, or Chinese name
+    #[arg(long, value_name = "ID")]
+    pub(crate) id: Option<String>,
+}
+
+/// Apply an action list, or one built-in preset, to every image in a directory
 ///
-/// A Photoshop Actions file (.atn) is a set: its action --action names plays, as below. JSON steps
-/// are [id, params] pairs, {"command": id, "params": {…}} objects or bare ids, as a recorded
-/// action or droplet stores them (a list, or wrapped in {"actions": …}, {"steps": …} or a
-/// droplet). An Actions set (the Actions panel's actions.json, {"actions": [{"name", "steps"}…]})
-/// plays the action --action names (needed when the set holds more than one) with the whole set
-/// loaded, so its steps can play other actions of the set.
+/// Pass --actions or --preset, not both. A Photoshop Actions file (.atn) is a set: its action
+/// --action names plays, as below. JSON steps are [id, params] pairs, {"command": id, "params":
+/// {…}} objects or bare ids, as a recorded action or droplet stores them (a list, or wrapped in
+/// {"actions": …}, {"steps": …} or a droplet). An Actions set (the Actions panel's actions.json,
+/// {"actions": [{"name", "steps"}…]}) plays the action --action names (needed when the set holds
+/// more than one) with the whole set loaded, so its steps can play other actions of the set.
+///
+/// --preset is a built-in id or its English or Chinese name (`photocraft-cli presets`). Its export
+/// format, quality and filename template are used unless --format, --quality or --naming is set.
+/// A preset does not replace a file that is already in --out unless --overwrite is passed, and it
+/// does not replace a source file unless --in-place is passed as well.
 #[derive(Args)]
 pub(crate) struct BatchArgs {
     /// The action list: actions.json, a droplet, or a Photoshop Actions file (.atn)
-    #[arg(long, value_name = "FILE")]
-    pub(crate) actions: PathBuf,
+    #[arg(long, value_name = "FILE", required_unless_present = "preset", conflicts_with = "preset")]
+    pub(crate) actions: Option<PathBuf>,
+    /// Built-in preset id, English name, or Chinese name
+    #[arg(long, value_name = "ID", conflicts_with = "action")]
+    pub(crate) preset: Option<String>,
+    /// JSON object merged over the preset's step parameters
+    #[arg(long, value_name = "JSON", value_parser = json, requires = "preset")]
+    pub(crate) preset_params: Option<Value>,
+    /// Replace a preset output that already exists. Without it, that file is left in place
+    #[arg(long)]
+    pub(crate) overwrite: bool,
     /// Which action of an Actions set to play
     #[arg(long, value_name = "NAME")]
     pub(crate) action: Option<String>,

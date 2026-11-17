@@ -239,6 +239,11 @@ photocraft-cli run wave.psd \
 # Apply one action list to a folder of images
 photocraft-cli batch --actions grade.json --in ./raw --out ./graded
 
+# Built-in export presets (resize, crop, watermark, rename). They do not replace a file
+# that is already in the output folder unless --overwrite is passed.
+photocraft-cli presets
+photocraft-cli batch --preset social.wechat-moments --in ./photos --out ./moments
+
 # Every subcommand explains itself
 photocraft-cli batch --help
 

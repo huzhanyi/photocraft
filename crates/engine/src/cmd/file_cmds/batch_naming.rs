@@ -304,6 +304,10 @@ pub fn plan(inputs: &[BatchInput], output: &str, format: &str, params: &Value) -
         if name.len() > 255 || name.chars().any(|c| c.is_control() || "/\\".contains(c)) {
             return Err(bad("naming must produce a filename of at most 255 bytes without path separators or reserved characters"));
         }
+        // `out/..` would leave the output folder. A slash is already rejected, so only the whole name can do this.
+        if name == "." || name == ".." {
+            return Err(bad("naming must not be `.` or `..`"));
+        }
         let windows = structured.is_none() || cfg!(windows) || compat.1;
         if windows && (name.contains(['<', '>', ':', '"', '|', '?', '*']) || structured.is_some() && super::is_windows_device_name(&name))
             || compat.0 && name.contains(':')
@@ -409,6 +413,11 @@ mod tests {
             p["startingSerial"] = json!(1);
             p["namingComponents"] = components;
             assert!(plan(&inputs, "output", "same", &p).is_err(), "{p}");
+        }
+        for naming in ["..", ".", "../{name}", "{name}"] {
+            let dot = vec![BatchInput { path: "input/...png".into(), rel_dir: String::new() }];
+            let result = plan(&dot, "output", "png", &json!({"naming": naming}));
+            assert!(result.is_err(), "{naming}: {result:?}");
         }
         p["namingComponents"] = json!([{"text":"safe"}]);
         p["compatibility"]["windows"] = json!("yes");
