@@ -16,6 +16,7 @@ mod document;
 mod error;
 mod gpu;
 mod output;
+mod presets;
 
 pub use actions::{ActionsError, Steps, load_actions, load_actions_file, parse_actions};
 use args::{Command, parse};
@@ -23,6 +24,7 @@ use automation::{commands, mcp, serve};
 use batch::{batch, droplet};
 use document::{convert, info, run_cmds};
 pub(crate) use error::{CliError, Result};
+use presets::list as list_presets;
 
 /// The command line's clap definition, for generating shell completions and man pages
 /// (`examples/man-and-completions.rs`).
@@ -55,6 +57,7 @@ where
         Command::Info(a) => info(a, out),
         Command::Run(a) => run_cmds(a, out, err),
         Command::Batch(a) => batch(a, out, err),
+        Command::Presets(a) => list_presets(a, out),
         Command::Droplet(a) => droplet(a, out, err),
         Command::Commands(a) => commands(a, out),
         Command::Mcp(a) => mcp(a, err),

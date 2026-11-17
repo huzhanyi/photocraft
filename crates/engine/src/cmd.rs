@@ -143,6 +143,8 @@ pub mod photo_cmds;
 pub mod pick_cmds;
 pub mod plugin_cmds;
 pub mod preset_import_cmds;
+pub mod preset_library;
+pub mod preset_library_cmds;
 pub mod print_cmds;
 pub mod rasterize_style_cmds;
 pub mod redeye_cmds;
@@ -1376,6 +1378,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::brush_preset_cmds::specs());
     v.extend(crate::eraser_cmds::specs());
     v.extend(crate::preset_import_cmds::specs());
+    v.extend(crate::preset_library_cmds::specs());
     v.extend(crate::style_asl_cmds::specs());
     v.extend(crate::atn_cmds::specs());
     v.extend(crate::actions_edit_cmds::specs());

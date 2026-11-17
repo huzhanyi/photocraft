@@ -47,13 +47,50 @@ fn strip_shell_steps(action: &mut Action) {
     (action.steps, action.disabled, action.dialogs) = (steps, disabled, dialogs);
 }
 
+fn refuse_preset_target(overwrite: bool, in_place: bool, input: &Path, target: &Path) -> Result<()> {
+    if target.is_dir() {
+        return Err(CliError::BatchOption(format!("{} is a directory; choose a file path", target.display())));
+    }
+    if photocraft_engine::file_cmds::same_file(input, target) && !in_place {
+        return Err(CliError::BatchOption(format!("{} is the source file; choose another --out folder, or pass --in-place --overwrite", target.display())));
+    }
+    if !overwrite && target.exists() {
+        return Err(CliError::BatchOption(format!("{} already exists; pass --overwrite to replace it", target.display())));
+    }
+    Ok(())
+}
+
 pub(crate) fn batch(a: &BatchArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result {
     let (in_dir, out_dir) = (a.in_dir.as_path(), a.out.as_path());
-    let (actions, mut set, warnings) = load_actions_file(&a.actions, a.action.as_deref())?;
+    let preset = match a.preset.as_deref() {
+        Some(id) => Some(photocraft_engine::preset_library_cmds::find(id)?),
+        None => None,
+    };
+    let (actions, mut set, warnings) = if let Some(preset) = preset {
+        let params = photocraft_engine::preset_library_cmds::merged_params(preset, a.preset_params.as_ref())?;
+        (vec![(preset.command().to_string(), params)], Vec::new(), Vec::new())
+    } else {
+        let path = a.actions.as_deref().ok_or_else(|| CliError::BatchOption("pass --actions or --preset".into()))?;
+        load_actions_file(path, a.action.as_deref())?
+    };
     set.iter_mut().for_each(strip_shell_steps);
     let mut seen_warnings = std::collections::HashSet::<String>::new();
     warn_dedup(err, &warnings, &mut seen_warnings);
-    let opts = ExportOptions::from(&a.export);
+    let mut opts = ExportOptions::from(&a.export);
+    if a.export.quality.is_none() {
+        crate::presets::apply_quality(&mut opts, preset.and_then(|preset| preset.quality));
+    }
+    let format_owned = a
+        .export
+        .format
+        .as_deref()
+        .map(|format| format.strip_prefix('.').unwrap_or(format).to_string())
+        .or_else(|| preset.and_then(|preset| preset.format.map(str::to_string)));
+    let naming = a.naming.clone().or_else(|| preset.and_then(|preset| preset.naming.map(str::to_string)));
+    if let Some(preset) = preset {
+        let format = format_owned.as_deref().unwrap_or("same");
+        let _ = writeln!(err, "{}", crate::presets::describe(preset, format, a.export.quality.or(preset.quality), naming.as_deref(), a.overwrite));
+    }
     // Results are saved as `<out>/<stem>.<ext>`, so an `--out` that is the `--in` folder would
     // replace the originals (#492).
     if !a.in_place && same_dir(in_dir, out_dir) {
@@ -80,12 +117,12 @@ pub(crate) fn batch(a: &BatchArgs, out: &mut dyn Write, err: &mut dyn Write) -> 
     };
     let (mut ok, mut failed) = (0, 0);
     // `--format .jpg` names outputs `<stem>.jpg`, as `--format jpg` does (#490).
-    let format = a.export.format.as_deref().map(|f| f.strip_prefix('.').unwrap_or(f));
+    let format = format_owned.as_deref();
     let named = photocraft_engine::file_cmds::plan_batch_names(
         &inputs,
         &out_dir.to_string_lossy(),
         format.unwrap_or("same"),
-        &json!({"naming": a.naming.as_deref().unwrap_or(""), "startingSerial": a.start_serial.unwrap_or(1)}),
+        &json!({"naming": naming.as_deref().unwrap_or(""), "startingSerial": a.start_serial.unwrap_or(1)}),
     )
     .map_err(|error| CliError::Naming(error.to_string()))?;
     let targets: Vec<PathBuf> = match named {
@@ -114,6 +151,17 @@ pub(crate) fn batch(a: &BatchArgs, out: &mut dyn Write, err: &mut dyn Write) -> 
     let mut renderer = policy.create_renderer();
     for (input, target) in inputs.iter().zip(targets) {
         let input = Path::new(&input.path);
+        if preset.is_some()
+            && let Err(error) = refuse_preset_target(a.overwrite, a.in_place, input, &target)
+        {
+            failed += 1;
+            let _ = writeln!(err, "FAIL  {}: {error}", input.display());
+            failures.push((input.to_string_lossy().into_owned(), error.to_string()));
+            if a.stop_on_error {
+                break;
+            }
+            continue;
+        }
         // The selected format encodes the bytes, whatever extension `--naming` gives the file.
         // Without --format, a file PhotoCraft only opens (.kra, raw, …) is saved as PSD, the
         // same format `--naming`'s {ext} plans.

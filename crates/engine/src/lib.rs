@@ -134,6 +134,7 @@ pub use cmd::photo_cmds;
 pub use cmd::pick_cmds;
 pub use cmd::plugin_cmds;
 pub use cmd::preset_import_cmds;
+pub use cmd::preset_library_cmds;
 pub use cmd::print_cmds;
 pub use cmd::rasterize_style_cmds;
 pub use cmd::redeye_cmds;
