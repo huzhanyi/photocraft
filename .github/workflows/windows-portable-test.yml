@@ -1,0 +1,214 @@
+name: Windows portable test
+
+# One Windows x64 portable build of a reviewed commit. This file lives only on
+# windows-portable-test. It does not run on main, on release, or on pull requests.
+# It does not tag, release, sign, or publish. The desktop window is not started.
+on:
+  push:
+    branches: [windows-portable-test]
+    paths: [".github/workflows/windows-portable-test.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-portable-test
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64 portable
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      SOURCE_SHA: 398feb94eaae082a5c6fd65ce3fdf9cdfdd4b349
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out the reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 398feb94eaae082a5c6fd65ce3fdf9cdfdd4b349
+          persist-credentials: false
+
+      - name: Require that exact source commit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:SOURCE_SHA) { throw "checked out $head, expected $env:SOURCE_SHA" }
+          Write-Output "source $head"
+
+      - name: Install Rust 1.95.0
+        uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build desktop and CLI
+        shell: pwsh
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+          PHOTOCRAFT_BUILD_SHA: 398feb94eaae082a5c6fd65ce3fdf9cdfdd4b349
+          PHOTOCRAFT_REQUIRE_WINRES: "1"
+        run: cargo build --release --locked -p photocraft -p photocraft-cli --target x86_64-pc-windows-msvc
+
+      - name: Check PE headers without launching the desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path (Get-Location) 'target\x86_64-pc-windows-msvc\release'
+          function Get-Pe([string] $Path) {
+            $bytes = [System.IO.File]::ReadAllBytes($Path)
+            $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+            return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
+          }
+          foreach ($check in @(@('photocraft.exe', 2), @('photocraft-cli.exe', 3))) {
+            $path = Join-Path $bin $check[0]
+            $h = Get-Pe $path
+            if ($h.Machine -ne 0x8664) { throw "$($check[0]) machine 0x$('{0:X}' -f $h.Machine), expected 0x8664" }
+            if ($h.Subsystem -ne $check[1]) { throw "$($check[0]) subsystem $($h.Subsystem), expected $($check[1])" }
+            Write-Output "ok $($check[0]): x64 subsystem $($h.Subsystem)"
+          }
+          Write-Output 'GUI not started. photocraft.exe was not executed. PE subsystem 2 means Windows GUI; subsystem 3 means console.'
+
+      - name: Smoke-test the CLI on a generated image
+        shell: pwsh
+        env:
+          PHOTOCRAFT_CONFIG_DIR: ${{ runner.temp }}\photocraft-smoke-config
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force -Path $env:PHOTOCRAFT_CONFIG_DIR | Out-Null
+          $cli = Join-Path (Get-Location) 'target\x86_64-pc-windows-msvc\release\photocraft-cli.exe'
+          $root = Join-Path $env:RUNNER_TEMP 'preset-smoke'
+          $in = Join-Path $root 'in'
+          $renamed = Join-Path $root 'renamed'
+          $scaled = Join-Path $root 'scaled'
+          $marked = Join-Path $root 'marked'
+          New-Item -ItemType Directory -Force -Path $in, $renamed, $scaled, $marked | Out-Null
+          $source = Join-Path $in 'photo.png'
+          $pad = Join-Path $root 'square.png'
+          $log = New-Object System.Collections.Generic.List[string]
+
+          function Fail([string] $Message) { throw $Message }
+
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) { Fail "photocraft-cli --version exited $LASTEXITCODE" }
+          $log.Add('version exit 0')
+
+          $list = (& $cli presets | Out-String)
+          if ($LASTEXITCODE -ne 0) { Fail "presets exited $LASTEXITCODE" }
+          foreach ($needle in @('product.square-white', '方形白底', 'batch.long-edge', 'batch.watermark', 'batch.rename', 'id.face')) {
+            if ($list -notmatch [regex]::Escape($needle)) { Fail "presets list missing $needle" }
+          }
+          $log.Add('presets list exit 0, including omitted id.face')
+
+          & $cli presets --id id.face
+          if ($LASTEXITCODE -eq 0) { Fail 'presets --id id.face exited 0' }
+          $log.Add("presets --id id.face exit $LASTEXITCODE")
+
+          & $cli run --new '{"width":40,"height":20,"background":"#00ff00"}' --out $source
+          if ($LASTEXITCODE -ne 0) { Fail "run --new exited $LASTEXITCODE" }
+          $sourceHash = (Get-FileHash $source -Algorithm SHA256).Hash
+
+          & $cli run $source --preset product.square-white --preset-params '{"padding":0}' --format png --out $pad
+          if ($LASTEXITCODE -ne 0) { Fail "square pad exited $LASTEXITCODE" }
+          $padInfo = (& $cli info --compact $pad | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { Fail "info square exited $LASTEXITCODE : $padInfo" }
+          $padDoc = $padInfo | ConvertFrom-Json
+          if ([int]$padDoc.width -ne 40 -or [int]$padDoc.height -ne 40) { Fail "square pad is $($padDoc.width)x$($padDoc.height)" }
+          $padHash = (Get-FileHash $pad -Algorithm SHA256).Hash
+          & $cli run $source --preset '方形白底' --preset-params '{"padding":0}' --format png --out $pad
+          if ($LASTEXITCODE -eq 0) { Fail 'second square pad exited 0' }
+          if ((Get-FileHash $pad -Algorithm SHA256).Hash -ne $padHash) { Fail 'refused overwrite changed the file' }
+          $log.Add("square pad 40x40 exit 0; second run exit $LASTEXITCODE and file unchanged")
+
+          & $cli batch --preset batch.long-edge --preset-params '{"pixels":10}' --in $in --out $scaled --format png
+          if ($LASTEXITCODE -ne 0) { Fail "long-edge exited $LASTEXITCODE" }
+          $scaledPath = Join-Path $scaled 'photo.png'
+          $scaledInfo = (& $cli info --compact $scaledPath | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { Fail "info scaled exited $LASTEXITCODE : $scaledInfo" }
+          $scaledDoc = $scaledInfo | ConvertFrom-Json
+          if ([int]$scaledDoc.width -ne 10 -or [int]$scaledDoc.height -ne 5) { Fail "long-edge is $($scaledDoc.width)x$($scaledDoc.height)" }
+          $log.Add('long-edge pixels 10 is 10x5, exit 0')
+
+          & $cli batch --preset batch.watermark --in $in --out $marked --format png
+          if ($LASTEXITCODE -ne 0) { Fail "watermark exited $LASTEXITCODE" }
+          $markedPath = Join-Path $marked 'photo.png'
+          $markedInfo = (& $cli info --compact $markedPath | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { Fail "info watermark exited $LASTEXITCODE : $markedInfo" }
+          $markedDoc = $markedInfo | ConvertFrom-Json
+          if ([int]$markedDoc.width -ne 40 -or [int]$markedDoc.height -ne 20) { Fail "watermark changed size to $($markedDoc.width)x$($markedDoc.height)" }
+          if ((Get-FileHash $markedPath -Algorithm SHA256).Hash -eq $sourceHash) { Fail 'watermark output matches the source bytes' }
+          $log.Add('watermark exit 0, size unchanged, bytes differ from source')
+
+          & $cli batch --preset batch.rename --in $in --out $renamed --format png
+          if ($LASTEXITCODE -ne 0) { Fail "rename exited $LASTEXITCODE" }
+          $named = Join-Path $renamed '001_photo.png'
+          if (-not (Test-Path -LiteralPath $named)) { Fail '001_photo.png was not written' }
+          & $cli batch --preset batch.rename --in $in --out $renamed --format png
+          if ($LASTEXITCODE -eq 0) { Fail 'second rename exited 0' }
+          $log.Add("rename 001_photo.png exit 0; second run exit $LASTEXITCODE")
+
+          if ((Get-FileHash $source -Algorithm SHA256).Hash -ne $sourceHash) { Fail 'source photo.png changed' }
+          $log.Add('source photo.png unchanged')
+          $log.Add('desktop GUI was not launched')
+          $log | Set-Content -Encoding utf8 (Join-Path (Get-Location) 'SMOKE.txt')
+          $log | Write-Output
+
+      - name: Pack portable zip and SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path (Get-Location) 'target\x86_64-pc-windows-msvc\release'
+          $stage = Join-Path (Get-Location) 'dist\portable'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item (Join-Path $bin 'photocraft.exe'), (Join-Path $bin 'photocraft-cli.exe'), (Join-Path (Get-Location) 'SMOKE.txt') $stage
+          Copy-Item (Join-Path (Get-Location) 'packaging\windows\portable.txt') $stage
+          foreach ($name in @('README.md', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md')) {
+            $path = Join-Path (Get-Location) $name
+            if (-not (Test-Path -LiteralPath $path)) { throw "missing $name" }
+            Copy-Item $path $stage
+          }
+          @'
+          PhotoCraft Windows x64 portable test build
+          Source commit: 398feb94eaae082a5c6fd65ce3fdf9cdfdd4b349
+          This is a test artifact. It is not a release, it is not signed, and it does not include HEIC/HEIF.
+
+          Do not copy these files over C:\Program Files\ArtCraft\PhotoCraft.
+          Extract the zip into its own new folder. portable.txt beside photocraft.exe keeps settings,
+          brush presets and recovery files in PhotoCraftData\ next to the exe, not in %APPDATA%.
+          To use a different empty folder instead, set PHOTOCRAFT_CONFIG_DIR before starting either program.
+          Leave the installed PhotoCraft alone. A CLI from this zip does not add its commands to an older desktop.
+
+          The build job ran photocraft-cli.exe on one generated 40x20 image. It did not start photocraft.exe.
+          SMOKE.txt is the CLI result. GUI behaviour of this desktop build was not tested.
+          '@ | Set-Content -Encoding utf8 (Join-Path $stage 'ISOLATED.txt')
+          $zip = Join-Path (Get-Location) 'photocraft-test-398feb94e-windows-x64-portable.zip'
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+          $check = Join-Path $env:RUNNER_TEMP 'portable-zip-check'
+          Expand-Archive -Path $zip -DestinationPath $check -Force
+          foreach ($name in @('photocraft.exe', 'photocraft-cli.exe', 'portable.txt', 'ISOLATED.txt', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'ATTRIBUTION.md', 'SMOKE.txt')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $check $name))) { throw "zip root is missing $name" }
+          }
+          $sums = Join-Path (Get-Location) 'SHA256SUMS.txt'
+          @(
+            (Join-Path $stage 'photocraft.exe'),
+            (Join-Path $stage 'photocraft-cli.exe'),
+            $zip
+          ) | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_).Hash.ToLowerInvariant()
+            '{0}  {1}' -f $hash, (Split-Path $_ -Leaf)
+          } | Set-Content -Encoding ascii $sums
+          Get-Content $sums
+
+      - name: Upload the portable zip for 7 days
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-x64-portable-398feb94e
+          path: |
+            photocraft-test-398feb94e-windows-x64-portable.zip
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
