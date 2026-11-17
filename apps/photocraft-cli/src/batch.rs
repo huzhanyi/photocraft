@@ -47,9 +47,36 @@ fn strip_shell_steps(action: &mut Action) {
     (action.steps, action.disabled, action.dialogs) = (steps, disabled, dialogs);
 }
 
-fn refuse_preset_target(overwrite: bool, in_place: bool, input: &Path, target: &Path) -> Result<()> {
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `target` stays a file inside `root` after `..` is resolved. `std::path::absolute` normalizes
+/// `.` and `..` without requiring the file to exist.
+fn output_inside(root: &Path, target: &Path) -> bool {
+    let Ok(root) = std::path::absolute(root) else { return false };
+    let Ok(target) = std::path::absolute(target) else { return false };
+    let root = lexical(&root);
+    let target = lexical(&target);
+    target.starts_with(&root) && target != root
+}
+
+fn refuse_preset_target(overwrite: bool, in_place: bool, out_dir: &Path, input: &Path, target: &Path) -> Result<()> {
     if target.is_dir() {
         return Err(CliError::BatchOption(format!("{} is a directory; choose a file path", target.display())));
+    }
+    if !output_inside(out_dir, target) {
+        return Err(CliError::BatchOption(format!("{} is outside the output folder", target.display())));
     }
     if photocraft_engine::file_cmds::same_file(input, target) && !in_place {
         return Err(CliError::BatchOption(format!("{} is the source file; choose another --out folder, or pass --in-place --overwrite", target.display())));
@@ -152,7 +179,7 @@ pub(crate) fn batch(a: &BatchArgs, out: &mut dyn Write, err: &mut dyn Write) -> 
     for (input, target) in inputs.iter().zip(targets) {
         let input = Path::new(&input.path);
         if preset.is_some()
-            && let Err(error) = refuse_preset_target(a.overwrite, a.in_place, input, &target)
+            && let Err(error) = refuse_preset_target(a.overwrite, a.in_place, out_dir, input, &target)
         {
             failed += 1;
             let _ = writeln!(err, "FAIL  {}: {error}", input.display());

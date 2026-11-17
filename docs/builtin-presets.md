@@ -68,7 +68,11 @@ Write the file with `doc_export` / `doc_save` using the `export` object (`format
 | `batch.to-webp` | Convert to WebP 80 · 转为 WebP | Transparency flattened onto white | WebP 80 |
 | `batch.to-tiff` | Convert to TIFF · 转为 TIFF | Pixels unchanged, transparency kept | TIFF |
 
-Filename tokens are the Batch tokens: `{name}`, `{serial}` / `{serial:3}`, `{date}`, `{ext}`, and the case variants. The template is the whole file name.
+Filename tokens are the Batch tokens: `{name}`, `{serial}` / `{serial:3}`, `{date}`, `{ext}`, and the case variants. The template is the whole file name. A result of `.` or `..`, or any name with a slash, is refused, so the file cannot leave the output folder.
+
+## Desktop bridge
+
+`photocraft-cli mcp` without `--headless` forwards commands to the running desktop. A desktop that is still v0.23.1 does not contain `presets.*`, `image.fitFrame`, `image.squarePad`, `image.fitLongEdge`, `image.matte`, or `layer.watermark`. Those commands exist only in a build that includes this library. Headless `photocraft-cli batch` and `photocraft-cli run` use the CLI's own engine, so they do not need the open desktop. Bridging to an older desktop does not make the new commands appear there.
 
 ## Commands
 

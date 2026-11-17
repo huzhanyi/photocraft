@@ -164,6 +164,75 @@ mod tests {
         assert_eq!(scale.code, 0, "stderr {}\nstdout {}", scale.stderr, scale.stdout);
         let image = photocraft_codecs::decode(&std::fs::read(scaled.join("photo.png")).unwrap()).unwrap();
         assert_eq!(image.dimensions(), (10, 5));
+        let bytes_before = std::fs::read(&source).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), bytes_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: [u8; 4]) {
+        let data = rgba.to_vec().repeat((w * h) as usize);
+        let image = photocraft_codecs::Image::from_u8(w, h, photocraft_codecs::ChannelLayout::Rgba, data).unwrap();
+        std::fs::write(path, photocraft_codecs::encode(&image, photocraft_codecs::Format::Png, &Default::default()).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn preset_exports_keep_dimensions_across_png_jpeg_and_webp_and_refuse_bad_paths() {
+        let dir = std::env::temp_dir().join(format!("photocraft-cli-preset-formats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let input = dir.join("in");
+        std::fs::create_dir_all(input.join("a")).unwrap();
+        std::fs::create_dir_all(input.join("b")).unwrap();
+        write_png(&input.join("a").join("photo.png"), 12, 8, [255, 0, 0, 255]);
+        write_png(&input.join("b").join("photo.png"), 12, 8, [0, 0, 255, 255]);
+        write_png(&input.join("...png"), 4, 4, [0, 255, 0, 255]);
+        let source_bytes = std::fs::read(input.join("a").join("photo.png")).unwrap();
+        for (format, name) in [("png", "out.png"), ("jpg", "out.jpg"), ("webp", "out.webp")] {
+            let out = dir.join(name);
+            let run = invoke(&[
+                "run",
+                input.join("a").join("photo.png").to_str().unwrap(),
+                "--preset",
+                "social.wechat-moments",
+                "--preset-params",
+                r#"{"width":6,"height":4}"#,
+                "--format",
+                format,
+                "--out",
+                out.to_str().unwrap(),
+            ]);
+            assert_eq!(run.code, 0, "{format} stderr {} stdout {}", run.stderr, run.stdout);
+            let decoded = photocraft_codecs::decode(&std::fs::read(&out).unwrap()).unwrap();
+            assert_eq!(decoded.dimensions(), (6, 4), "{format}");
+        }
+        assert_eq!(std::fs::read(input.join("a").join("photo.png")).unwrap(), source_bytes);
+        let collided = dir.join("collided");
+        let collision = invoke(&["batch", "--preset", "batch.to-png", "--in", input.to_str().unwrap(), "--out", collided.to_str().unwrap(), "--recursive"]);
+        assert_ne!(collision.code, 0, "{}", collision.stdout);
+        assert!(collision.stderr.contains("already exists") || collision.stderr.contains("outside"), "{}\n{}", collision.stderr, collision.stdout);
+        let escaped = dir.join("escaped");
+        std::fs::create_dir_all(&escaped).unwrap();
+        let parent_before = std::fs::read_dir(&dir).unwrap().count();
+        let escape = invoke(&["batch", "--preset", "batch.to-png", "--naming", "{name}", "--in", input.to_str().unwrap(), "--out", escaped.to_str().unwrap()]);
+        assert_ne!(escape.code, 0, "{}", escape.stdout);
+        assert!(escape.stderr.contains("`.`") || escape.stderr.contains("`..`") || escape.stderr.contains("naming"), "{}", escape.stderr);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), parent_before);
+        let bad = invoke(&[
+            "run",
+            input.join("a").join("photo.png").to_str().unwrap(),
+            "--preset",
+            "batch.long-edge",
+            "--preset-params",
+            "[]",
+            "--out",
+            dir.join("bad.png").to_str().unwrap(),
+        ]);
+        assert_ne!(bad.code, 0, "{}", bad.stdout);
+        assert!(!dir.join("bad.png").exists());
+        let same = input.join("a");
+        let in_place = invoke(&["batch", "--preset", "batch.to-png", "--in", same.to_str().unwrap(), "--out", same.to_str().unwrap(), "--in-place"]);
+        assert_ne!(in_place.code, 0, "{}", in_place.stdout);
+        assert!(in_place.stderr.contains("already exists"), "{}", in_place.stderr);
+        assert_eq!(std::fs::read(input.join("a").join("photo.png")).unwrap(), source_bytes);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

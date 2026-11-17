@@ -145,16 +145,30 @@ fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]
 }
 
+fn premul(pixel: [f32; 4]) -> [f32; 4] {
+    let alpha = pixel[3].clamp(0.0, 1.0);
+    [pixel[0] * alpha, pixel[1] * alpha, pixel[2] * alpha, alpha]
+}
+
+fn unpremul(pixel: [f32; 4]) -> [f32; 4] {
+    if pixel[3] <= 1.0e-5 { [0.0; 4] } else { [pixel[0] / pixel[3], pixel[1] / pixel[3], pixel[2] / pixel[3], pixel[3].clamp(0.0, 1.0)] }
+}
+
+/// Straight-alpha samples are premultiplied before the mix, and coordinates outside the bitmap
+/// repeat the edge pixel. Inventing transparent black past the edge would turn an opaque border
+/// pink or grey once it is matted.
 fn bilinear(px: &[[f32; 4]], w: u32, h: u32, x: f64, y: f64) -> [f32; 4] {
-    if !x.is_finite() || !y.is_finite() {
+    if !x.is_finite() || !y.is_finite() || w == 0 || h == 0 {
         return [0.0; 4];
     }
+    let x = x.clamp(0.0, f64::from(w - 1));
+    let y = y.clamp(0.0, f64::from(h - 1));
     let (Some(ix), Some(iy)) = (float_i32(x.floor()), float_i32(y.floor())) else { return [0.0; 4] };
     let tx = (x - x.floor()) as f32;
     let ty = (y - y.floor()) as f32;
-    let top = lerp4(at(px, w, h, ix, iy), at(px, w, h, ix.saturating_add(1), iy), tx);
-    let bottom = lerp4(at(px, w, h, ix, iy.saturating_add(1)), at(px, w, h, ix.saturating_add(1), iy.saturating_add(1)), tx);
-    lerp4(top, bottom, ty)
+    let top = lerp4(premul(at(px, w, h, ix, iy)), premul(at(px, w, h, ix.saturating_add(1), iy)), tx);
+    let bottom = lerp4(premul(at(px, w, h, ix, iy.saturating_add(1))), premul(at(px, w, h, ix.saturating_add(1), iy.saturating_add(1))), tx);
+    unpremul(lerp4(top, bottom, ty))
 }
 
 fn over(src: [f32; 4], background: [f32; 3]) -> [f32; 4] {
@@ -309,6 +323,9 @@ fn render_scale(src: &[[f32; 4]], sw: u32, sh: u32, dw: u32, dh: u32) -> Result<
 }
 
 fn alpha_bounds(px: &[[f32; 4]], w: u32, _h: u32) -> Option<(i32, i32, i32, i32)> {
+    if w == 0 {
+        return None;
+    }
     let mut bounds: Option<(i32, i32, i32, i32)> = None;
     let threshold = 0.5 / 255.0;
     for (index, pixel) in px.iter().enumerate() {
@@ -682,7 +699,8 @@ fn place_logo(doc: &mut Document, active: &mut Option<LayerId>, pixels: &[[f32; 
     let mut layer = Layer::raster("Logo", fmt);
     layer.opacity = opacity;
     *crate::pixels_mut(&mut layer)? = surf;
-    let id = crate::layer_place::insert_new(doc, *active, layer, crate::layer_place::Place::AutoEditable);
+    // Above every existing layer, including ones stacked above the active layer.
+    let id = crate::layer_place::insert_new(doc, None, layer, crate::layer_place::Place::Above);
     *active = Some(id);
     Ok(id.0)
 }
@@ -709,7 +727,8 @@ fn place_text(
     let owned = text.clone();
     let mut layer = Layer::new("Watermark", LayerContent::Text(owned));
     layer.opacity = opacity;
-    let id = crate::layer_place::insert_new(doc, *active, layer, crate::layer_place::Place::AutoEditable);
+    // After the logo, so the text is the topmost layer.
+    let id = crate::layer_place::insert_new(doc, None, layer, crate::layer_place::Place::Above);
     *active = Some(id);
     Ok(id.0)
 }
@@ -1023,12 +1042,19 @@ mod tests {
             let scaled = session.execute("image.fitLongEdge", json!({"pixels": 10})).unwrap();
             assert_eq!((scaled["width"].as_u64(), scaled["height"].as_u64()), (Some(10), Some(5)));
             near(rgba(&session, 5, 2), [1.0, 0.0, 0.0, 1.0]);
+            let mut session = new_doc(8, 4, depth, "#ff0000");
+            session.execute("image.fitFrame", json!({"width": 16, "height": 8, "mode": "cover"})).unwrap();
+            near(rgba(&session, 0, 0), [1.0, 0.0, 0.0, 1.0]);
+            near(rgba(&session, 15, 7), [1.0, 0.0, 0.0, 1.0]);
             let steps = session.active().unwrap().history.past_len();
             let same = session.execute("image.fitLongEdge", json!({"pixels": 100, "dontEnlarge": true})).unwrap();
             assert_eq!(same["changed"], false);
             assert_eq!(session.active().unwrap().history.past_len(), steps);
         }
         let mut session = new_doc(8, 8, 8, "transparent");
+        let before = session.active().unwrap().doc.size;
+        assert!(session.execute("image.squarePad", json!({})).is_err());
+        assert_eq!((session.active().unwrap().doc.size.width, session.active().unwrap().doc.size.height), (before.width, before.height));
         paint(&mut session, 3, 3, 2, 2, [1.0, 0.0, 0.0, 1.0]);
         session.execute("image.matte", json!({"color": "#FFFFFF"})).unwrap();
         near(rgba(&session, 0, 0), [1.0, 1.0, 1.0, 1.0]);
@@ -1083,6 +1109,14 @@ mod tests {
             session.execute("edit.undo", json!({})).unwrap();
             assert!(session.active().unwrap().doc.layers.iter().all(|layer| layer.name != "Watermark"));
         }
+        let mut session = new_doc(40, 20, 8, "white");
+        session.execute("layer.new.layer", json!({"name": "Above"})).unwrap();
+        session.execute("layer.watermark", json!({"text": "Top"})).unwrap();
+        let names: Vec<_> = session.active().unwrap().doc.layers.iter().map(|layer| layer.name.as_str()).collect();
+        assert_eq!(names.last().copied(), Some("Watermark"));
+        let above = names.iter().position(|name| *name == "Above").unwrap();
+        let mark = names.iter().position(|name| *name == "Watermark").unwrap();
+        assert!(above < mark, "{names:?}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
